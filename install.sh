@@ -1,15 +1,24 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 umask 077
+# 先解析整个代码块，避免管道模式切换终端输入后丢失尚未读取的脚本。
+{
 case ${1:-} in
     -h|--help)
-        printf '用法：bash install.sh\nDebian 12 专用交互式安装器。请将仓库完整下载后以 root 执行。\n已有有效配置时保留身份、端口和目标网站；身份重置请使用 /root/xray-reconfigure。\n'
+        printf '用法：bash install.sh\nDebian 12 专用交互式安装器。支持完整仓库本地安装及 curl 管道安装，请以 root 执行。\n已有有效配置时保留身份、端口和目标网站；身份重置请使用 /root/xray-reconfigure。\n'
         exit 0 ;;
 esac
 (( $# == 0 )) || { printf '错误：安装器不接受参数。\n' >&2; exit 1; }
 (( EUID == 0 )) || { printf '错误：请使用 root 执行安装器。\n' >&2; exit 1; }
 source /etc/os-release
 [[ $ID == debian && $VERSION_ID == 12 ]] || { printf '错误：仅支持 Debian 12 Bookworm。\n' >&2; exit 1; }
+installer_source=${BASH_SOURCE[0]:-}
+if [[ -z $installer_source ]]; then
+    if ! { exec </dev/tty; } 2>/dev/null; then
+        printf '错误：管道安装需要交互终端，请通过 SSH 终端运行，或完整下载仓库后本地安装。\n' >&2
+        exit 1
+    fi
+fi
 printf '====================================\n       Xray 一键安装工具\n       Debian 12 专用\n====================================\n\n'
 verify_password() {
     local salt='b46a145248b27761ecd3b16d81251989' expected='ec4e2b4307615e5d8f9a1a26f6dcae7ffeacb30526dea49e1029bc63e8a1b4dd' password digest attempt
@@ -31,16 +40,46 @@ verify_password() {
     return 1
 }
 verify_password || exit 1
-script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+work=$(mktemp -d) || { printf '错误：创建安全临时目录失败。\n' >&2; exit 1; }
+cleanup() { local status=$?; rm -rf "$work"; exit "$status"; }
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+trap 'printf "错误：操作失败（第 %s 行），已停止。\n" "$LINENO" >&2' ERR
+if [[ -n $installer_source ]]; then
+    script_dir=$(cd -- "$(dirname -- "$installer_source")" && pwd)
+else
+    command -v curl >/dev/null || { printf '错误：管道安装需要 curl，请先安装 curl 和 ca-certificates。\n' >&2; exit 1; }
+    # 此快照的三个管理脚本与本版本所附文件完全相同，按固定提交及校验值下载。
+    helper_revision=6bf36a421e09fb30f2fb3afb9a71a4a5e0c1e5e5
+    script_dir=$work
+    printf '正在下载固定版本的管理脚本……\n'
+    for script in xray-link xray-qrcode xray-reconfigure; do
+        case $script in
+            xray-link) expected=b2ce11dd0db0f4f0dadb79556cbf842fdf9f8e566e98de095479c786711aeeb4 ;;
+            xray-qrcode) expected=21703a340402a8796a063647564b4f7acd7af41302aaf142616971ad41f42421 ;;
+            xray-reconfigure) expected=f1d3e6d6111c05c496b67e628f9d5e102f2546e881c52a0b3c7b406ffa73f476 ;;
+        esac
+        curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 \
+            "https://raw.githubusercontent.com/WattPrinter/xray-deploy/$helper_revision/$script" \
+            -o "$script_dir/$script" >"$work/download.log" 2>&1 || {
+                printf '错误：下载管理脚本 %s 失败，已停止安装。\n' "$script" >&2; exit 1
+            }
+        if [[ ! -s $script_dir/$script ]] ||
+            ! printf '%s  %s\n' "$expected" "$script_dir/$script" | sha256sum -c - >"$work/download.log" 2>&1 ||
+            ! bash -n "$script_dir/$script" >"$work/download.log" 2>&1; then
+            printf '错误：管理脚本 %s 的完整性或语法验证失败，已停止安装。\n' "$script" >&2
+            exit 1
+        fi
+    done
+    printf '三个管理脚本已下载并验证。\n'
+fi
 for script in xray-link xray-qrcode xray-reconfigure; do
     [[ -s $script_dir/$script ]] || { printf '错误：仓库缺少 %s，请完整下载仓库。\n' "$script" >&2; exit 1; }
 done
 source "$script_dir/xray-link"
 xray_lock
-work=$(mktemp -d)
-cleanup() { local status=$?; rm -rf "$work"; exit "$status"; }
-trap cleanup EXIT
-trap 'printf "错误：操作失败（第 %s 行），已停止。\n" "$LINENO" >&2' ERR
 printf '[1/5] 安装必要依赖\n'
 # 第三方命令输出保存在 root-only 临时文件；界面始终使用中文。
 export DEBIAN_FRONTEND=noninteractive
@@ -293,3 +332,4 @@ printf '\nXray 安装完成！\n配置校验：通过\n服务状态：运行中\
 printf '本工具已完成本地监听和防火墙检查；公网可达性与 REALITY 客户端连接仍需从外部验证。\n\n'
 /root/xray-link
 /root/xray-qrcode
+}
