@@ -10,6 +10,27 @@ esac
 (( EUID == 0 )) || { printf '错误：请使用 root 执行安装器。\n' >&2; exit 1; }
 source /etc/os-release
 [[ $ID == debian && $VERSION_ID == 12 ]] || { printf '错误：仅支持 Debian 12 Bookworm。\n' >&2; exit 1; }
+printf '====================================\n       Xray 一键安装工具\n       Debian 12 专用\n====================================\n\n'
+verify_password() {
+    local salt='b46a145248b27761ecd3b16d81251989' expected='ec4e2b4307615e5d8f9a1a26f6dcae7ffeacb30526dea49e1029bc63e8a1b4dd' password digest attempt
+    for attempt in 1 2 3; do
+        if ! read -rs -p '请输入安装密码：' password; then
+            printf '\n错误：输入结束，已停止。\n' >&2
+            return 1
+        fi
+        printf '\n'
+        digest=$(printf '%s%s' "$salt" "$password" | sha256sum)
+        unset password
+        if [[ ${digest%% *} == "$expected" ]]; then
+            printf '密码验证成功。\n\n'
+            return 0
+        fi
+        printf '安装密码错误，剩余尝试次数：%s\n' "$((3 - attempt))" >&2
+    done
+    printf '错误：连续三次密码验证失败，已停止。\n' >&2
+    return 1
+}
+verify_password || exit 1
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 for script in xray-link xray-qrcode xray-reconfigure; do
     [[ -s $script_dir/$script ]] || { printf '错误：仓库缺少 %s，请完整下载仓库。\n' "$script" >&2; exit 1; }
@@ -20,7 +41,7 @@ work=$(mktemp -d)
 cleanup() { local status=$?; rm -rf "$work"; exit "$status"; }
 trap cleanup EXIT
 trap 'printf "错误：操作失败（第 %s 行），已停止。\n" "$LINENO" >&2' ERR
-printf '====================================\n       Xray 一键安装工具\n       Debian 12 专用\n====================================\n\n[1/5] 安装必要依赖\n'
+printf '[1/5] 安装必要依赖\n'
 # 第三方命令输出保存在 root-only 临时文件；界面始终使用中文。
 export DEBIAN_FRONTEND=noninteractive
 apt-get update >"$work/apt.log" 2>&1 || {

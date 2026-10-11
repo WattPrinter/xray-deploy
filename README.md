@@ -14,7 +14,7 @@ xray-reconfigure
 README.md
 ```
 
-如果服务器已安装 Git，可以将下面地址替换为自己的仓库后执行：
+本仓库为 Public。Debian 12 服务器已安装 Git 时，以 root 执行：
 
 ```bash
 git clone https://github.com/WattPrinter/xray-deploy.git
@@ -23,6 +23,29 @@ bash install.sh
 ```
 
 也可以通过 SCP 将这五个文件上传到服务器后运行安装器。请勿只下载 `install.sh`，也不要使用管道将其直接传给 Bash。
+
+安装器要求输入安装密码，输入不会回显，最多尝试三次。密码请向维护者获取；源码仅保存随机盐和 SHA-256 哈希。验证成功后才执行依赖安装和原有部署流程，`--help` 无需密码。三个管理工具的行为不变。
+
+这是轻量使用门槛：修改源码即可绕过哈希验证，并非真正的访问控制，也不能保护公开源码或阻止离线猜测。
+
+现有 `v1.0.0` 是此前发布的版本，不含安装密码验证；新增验证目前应使用 `main` 分支。不会覆盖已发布的正式版本。
+
+也可以下载正式版本的 [Source code ZIP](https://github.com/WattPrinter/xray-deploy/archive/refs/tags/v1.0.0.zip)，在本机上传 VPS（替换服务器地址）：
+
+```bash
+scp xray-deploy-1.0.0.zip root@服务器地址:/root/
+```
+
+随后登录 Debian 12 VPS，以 root 解压并安装：
+
+```bash
+apt-get update
+apt-get install -y --no-install-recommends unzip
+unzip /root/xray-deploy-1.0.0.zip -d /root/
+bash /root/xray-deploy-1.0.0/install.sh
+```
+
+上述手动准备解压工具的命令独立于安装器；安装器自身的 apt 操作仍在密码验证成功后执行。
 
 项目可以放在 Debian 12 的任意目录，包括含空格的目录及 `/root/`。安装器使用 `${BASH_SOURCE[0]}` 定位自身目录，再读取同目录的三个管理脚本，不依赖运行命令时的当前工作目录。例如，项目位于 `/opt/xray-deploy/` 时，可以从其他目录调用：
 
@@ -158,6 +181,12 @@ ss -lntp
 测试期间出现过 apt 安装失败，安装器立即停止，单独及随后重新运行均成功；最初失败的临时日志未保留，因此未确定原因。最终版本已补充 root-only 的失败诊断日志。
 
 尚未实测：v2rayN 图形界面导入与扫码、原生 nftables/iptables 管理分支、Vultr 云防火墙 API 管理。分享链接已由独立 Xray 客户端使用；当前测试机实际走 UFW 分支。云防火墙没有授权，不执行 API 修改。
+
+## 安装密码入口测试
+
+新增入口通过本机隔离终端测试：正确密码进入原有 apt 入口；错误后重试成功；连续三次错误退出；终端 ECHO 关闭且密码不出现在输出中；失败时未执行锁操作、临时文件创建、apt 或安装命令；`--help` 无需密码。测试模拟 Debian 12 和 root 前置条件，并隔离 apt 等系统操作，不执行真实安装。
+
+Bash 语法及 ShellCheck 通过。三个管理脚本逐字保持不变；除新增密码入口和欢迎信息的位置外，原安装逻辑与路径定位逐字保持不变。本次未重新进行 VPS 部署或代理连接测试，也未重置现有身份参数。
 
 ## 上传 GitHub 前
 
