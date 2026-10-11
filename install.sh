@@ -19,15 +19,97 @@ if [[ -z $installer_source ]]; then
         exit 1
     fi
 fi
+[[ -t 0 ]] || { printf '错误：安装密码需要交互终端，请在 SSH 终端中运行。\n' >&2; exit 1; }
+work=''
+active_pid=''
+progress_active=0
+# shellcheck disable=SC2329 # 通过 trap 或 run_step 间接调用。
+cleanup() {
+    local status=$?
+    trap - EXIT INT TERM HUP
+    if [[ -n $active_pid ]]; then
+        kill -TERM -- "-$active_pid" 2>/dev/null || true
+        wait "$active_pid" 2>/dev/null || true
+    fi
+    if (( progress_active )); then printf '\r\033[2K'; fi
+    [[ -z $work ]] || rm -rf "$work"
+    exit "$status"
+}
+trap cleanup EXIT
+# shellcheck disable=SC2329 # 通过信号 trap 间接调用。
+cancel_install() {
+    if (( progress_active )); then printf '\r\033[2K'; progress_active=0; fi
+    printf '\n安装已取消。\n' >&2
+    exit "$1"
+}
+trap 'cancel_install 130' INT
+trap 'cancel_install 143' TERM
+trap 'cancel_install 129' HUP
+run_step() {
+    local title=$1 log=$2 status=0 frame=0 line
+    local frames=('|' '/' '-' $'\\')
+    shift 2
+    if [[ -t 1 ]]; then
+        progress_active=1
+    else
+        printf '正在执行：%s……\n' "$title"
+    fi
+    # 独立进程组只包含本步骤的工作进程；取消时不触及 systemd 管理的 Xray。
+    set -m
+    ( set +m; trap - EXIT ERR INT TERM HUP; "$@" ) </dev/null >"$log" 2>&1 &
+    active_pid=$!
+    set +m
+    while kill -0 "$active_pid" 2>/dev/null; do
+        if (( progress_active )); then
+            printf '\r\033[2K%s %s' "${frames[frame % 4]}" "$title"
+            frame=$((frame + 1))
+        fi
+        sleep 0.15
+    done
+    wait "$active_pid" || status=$?
+    active_pid=''
+    if (( progress_active )); then printf '\r\033[2K'; fi
+    progress_active=0
+    if (( status == 0 )); then
+        printf '✓ %s：已完成\n' "$title"
+    else
+        printf '✗ %s：失败（退出码 %s）\n' "$title" "$status" >&2
+        if [[ $log == "$work/apt.log" ]]; then
+            install -m 600 "$log" /root/xray-deploy-apt.log
+            printf '错误：apt 操作失败，详细日志位于 /root/xray-deploy-apt.log。\n' >&2
+        fi
+        while IFS= read -r line; do
+            [[ $line != 错误：* ]] || printf '%s\n' "$line" >&2
+        done < "$log"
+    fi
+    return "$status"
+}
 printf '====================================\n       Xray 一键安装工具\n       Debian 12 专用\n====================================\n\n'
 verify_password() {
-    local salt='b46a145248b27761ecd3b16d81251989' expected='ec4e2b4307615e5d8f9a1a26f6dcae7ffeacb30526dea49e1029bc63e8a1b4dd' password digest attempt
+    local salt='b46a145248b27761ecd3b16d81251989' expected='ec4e2b4307615e5d8f9a1a26f6dcae7ffeacb30526dea49e1029bc63e8a1b4dd' password digest attempt character
     for attempt in 1 2 3; do
-        if ! read -rs -p '请输入安装密码：' password; then
-            printf '\n错误：输入结束，已停止。\n' >&2
-            return 1
-        fi
-        printf '\n'
+        password=''
+        printf '请输入安装密码：' >&2
+        while true; do
+            if ! IFS= read -rsn1 character; then
+                unset password
+                printf '\n错误：输入结束，已停止。\n' >&2
+                return 1
+            fi
+            case $character in
+                '') printf '\n' >&2; break ;;
+                $'\177'|$'\b')
+                    if [[ -n $password ]]; then
+                        password=${password%?}
+                        printf '\b \b' >&2
+                    fi ;;
+                $'\004')
+                    unset password
+                    printf '\n错误：输入结束，已停止。\n' >&2
+                    return 1 ;;
+                *) password+=$character; printf '*' >&2 ;;
+            esac
+        done
         digest=$(printf '%s%s' "$salt" "$password" | sha256sum)
         unset password
         if [[ ${digest%% *} == "$expected" ]]; then
@@ -41,11 +123,6 @@ verify_password() {
 }
 verify_password || exit 1
 work=$(mktemp -d) || { printf '错误：创建安全临时目录失败。\n' >&2; exit 1; }
-cleanup() { local status=$?; rm -rf "$work"; exit "$status"; }
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap 'exit 129' HUP
 trap 'printf "错误：操作失败（第 %s 行），已停止。\n" "$LINENO" >&2' ERR
 if [[ -n $installer_source ]]; then
     script_dir=$(cd -- "$(dirname -- "$installer_source")" && pwd)
@@ -54,26 +131,29 @@ else
     # 此快照的三个管理脚本与本版本所附文件完全相同，按固定提交及校验值下载。
     helper_revision=6bf36a421e09fb30f2fb3afb9a71a4a5e0c1e5e5
     script_dir=$work
-    printf '正在下载固定版本的管理脚本……\n'
-    for script in xray-link xray-qrcode xray-reconfigure; do
-        case $script in
-            xray-link) expected=b2ce11dd0db0f4f0dadb79556cbf842fdf9f8e566e98de095479c786711aeeb4 ;;
-            xray-qrcode) expected=21703a340402a8796a063647564b4f7acd7af41302aaf142616971ad41f42421 ;;
-            xray-reconfigure) expected=f1d3e6d6111c05c496b67e628f9d5e102f2546e881c52a0b3c7b406ffa73f476 ;;
-        esac
-        curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 \
-            "https://raw.githubusercontent.com/WattPrinter/xray-deploy/$helper_revision/$script" \
-            -o "$script_dir/$script" >"$work/download.log" 2>&1 || {
-                printf '错误：下载管理脚本 %s 失败，已停止安装。\n' "$script" >&2; exit 1
-            }
-        if [[ ! -s $script_dir/$script ]] ||
-            ! printf '%s  %s\n' "$expected" "$script_dir/$script" | sha256sum -c - >"$work/download.log" 2>&1 ||
-            ! bash -n "$script_dir/$script" >"$work/download.log" 2>&1; then
-            printf '错误：管理脚本 %s 的完整性或语法验证失败，已停止安装。\n' "$script" >&2
-            exit 1
-        fi
-    done
-    printf '三个管理脚本已下载并验证。\n'
+    # shellcheck disable=SC2329 # 通过 trap 或 run_step 间接调用。
+    download_helpers() {
+        for script in xray-link xray-qrcode xray-reconfigure; do
+            case $script in
+                xray-link) expected=b2ce11dd0db0f4f0dadb79556cbf842fdf9f8e566e98de095479c786711aeeb4 ;;
+                xray-qrcode) expected=21703a340402a8796a063647564b4f7acd7af41302aaf142616971ad41f42421 ;;
+                xray-reconfigure) expected=f1d3e6d6111c05c496b67e628f9d5e102f2546e881c52a0b3c7b406ffa73f476 ;;
+            esac
+            curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 \
+                "https://raw.githubusercontent.com/WattPrinter/xray-deploy/$helper_revision/$script" \
+                -o "$script_dir/$script" >"$work/download.log" 2>&1 || {
+                    local status=$?
+                    printf '错误：下载管理脚本 %s 失败，已停止安装。\n' "$script" >&2; return "$status"
+                }
+            if [[ ! -s $script_dir/$script ]] ||
+                ! printf '%s  %s\n' "$expected" "$script_dir/$script" | sha256sum -c - >"$work/download.log" 2>&1 ||
+                ! bash -n "$script_dir/$script" >"$work/download.log" 2>&1; then
+                printf '错误：管理脚本 %s 的完整性或语法验证失败，已停止安装。\n' "$script" >&2
+                return 1
+            fi
+        done
+    }
+    run_step '下载并验证三个管理脚本' "$work/helpers.log" download_helpers
 fi
 for script in xray-link xray-qrcode xray-reconfigure; do
     [[ -s $script_dir/$script ]] || { printf '错误：仓库缺少 %s，请完整下载仓库。\n' "$script" >&2; exit 1; }
@@ -83,16 +163,9 @@ xray_lock
 printf '[1/5] 安装必要依赖\n'
 # 第三方命令输出保存在 root-only 临时文件；界面始终使用中文。
 export DEBIAN_FRONTEND=noninteractive
-apt-get update >"$work/apt.log" 2>&1 || {
-    install -m 600 "$work/apt.log" /root/xray-deploy-apt.log
-    xray_error '更新软件索引失败，请检查网络及 Debian 软件源；详细日志位于 /root/xray-deploy-apt.log。'; exit 1
-}
-apt-get install -y --no-install-recommends curl ca-certificates openssl jq qrencode iproute2 iptables nftables procps unzip \
-    >"$work/apt.log" 2>&1 || {
-        install -m 600 "$work/apt.log" /root/xray-deploy-apt.log
-        xray_error '安装必要依赖失败，请检查软件源、磁盘空间及 apt 状态；详细日志位于 /root/xray-deploy-apt.log。'; exit 1
-    }
-printf '依赖安装完成。\n'
+run_step '更新软件索引' "$work/apt.log" apt-get update
+run_step '安装必要依赖' "$work/apt.log" \
+    apt-get install -y --no-install-recommends curl ca-certificates openssl jq qrencode iproute2 iptables nftables procps unzip
 
 ask_ip() {
     local detected='' value endpoint
@@ -149,6 +222,7 @@ ask_target() {
 }
 
 # 只对已知、可识别的本地入站防火墙添加一个端口规则。
+# shellcheck disable=SC2329 # 通过 trap 或 run_step 间接调用。
 firewall() {
     local rules chains family table chain backend='' command4='' command6=''
     nft -j list ruleset >"$work/nft.json" 2>/dev/null || { xray_error '无法读取 nftables 规则，不能确认端口可放行。'; return 1; }
@@ -266,29 +340,34 @@ else
 fi
 
 printf '\n[3/5] 检查所选端口的本地防火墙\n'
-firewall
+run_step '本地防火墙端口放行' "$work/firewall-step.log" firewall
+cat "$work/firewall-step.log"
 printf 'Vultr Cloud Firewall 独立于本地防火墙；如已启用，请在控制台放行 TCP %s。\n' "$port"
 
 printf '\n[4/5] 安装官方稳定版与管理工具\n'
 if (( ! existing )); then
-    curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 \
-        https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh \
-        -o "$work/install-release.sh" 2>"$work/download.log" || { xray_error '下载 Xray 官方安装器失败。'; exit 1; }
-    bash "$work/install-release.sh" install -u root --without-geodata >"$work/core.log" 2>&1 ||
-        { xray_error 'Xray 官方稳定版安装失败，请检查 GitHub 下载网络与磁盘空间。'; exit 1; }
+    run_step '下载 Xray 官方安装器' "$work/download.log" \
+        curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 \
+        https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh -o "$work/install-release.sh"
+    run_step '安装 Xray-core 官方稳定版' "$work/core.log" \
+        bash "$work/install-release.sh" install -u root --without-geodata
     if [[ ! -x $XRAY_BIN ]] || ! "$XRAY_BIN" version >/dev/null 2>&1; then
         xray_error '安装后未找到可用的 Xray 核心。'; exit 1
     fi
     install -d -m 700 "$XRAY_DIR"
-    xray_identity
-    jq -n --argjson port "$port" --arg target "$target" --arg uuid "$XRAY_UUID" --arg private "$XRAY_PRIVATE" --arg sid "$XRAY_SID" '{
-        log: {loglevel:"warning"},
-        inbounds: [{listen:"0.0.0.0",port:$port,protocol:"vless",settings:{
-            clients:[{id:$uuid,flow:"xtls-rprx-vision"}],decryption:"none"},
-            streamSettings:{network:"raw",security:"reality",realitySettings:{
-                show:false,target:($target+":443"),xver:0,serverNames:[$target],privateKey:$private,shortIds:[$sid]}}}],
-        outbounds:[{protocol:"freedom",tag:"direct"}]}' > "$work/candidate.json"
-    xray_validate "$work/candidate.json" || { xray_error '首次生成的候选配置校验失败，未写入正式配置。'; exit 1; }
+    # shellcheck disable=SC2329 # 通过 trap 或 run_step 间接调用。
+    generate_config() {
+        xray_identity
+        jq -n --argjson port "$port" --arg target "$target" --arg uuid "$XRAY_UUID" --arg private "$XRAY_PRIVATE" --arg sid "$XRAY_SID" '{
+            log: {loglevel:"warning"},
+            inbounds: [{listen:"0.0.0.0",port:$port,protocol:"vless",settings:{
+                clients:[{id:$uuid,flow:"xtls-rprx-vision"}],decryption:"none"},
+                streamSettings:{network:"raw",security:"reality",realitySettings:{
+                    show:false,target:($target+":443"),xver:0,serverNames:[$target],privateKey:$private,shortIds:[$sid]}}}],
+            outbounds:[{protocol:"freedom",tag:"direct"}]}' > "$work/candidate.json"
+        xray_validate "$work/candidate.json" || { xray_error '首次生成的候选配置校验失败，未写入正式配置。'; return 1; }
+    }
+    run_step '生成并校验 REALITY 配置' "$work/config.log" generate_config
     install -m 600 "$work/candidate.json" "$XRAY_CONFIG"
 else
     printf '已保留现有 Xray 版本与配置；重复安装不自动升级核心。\n'
@@ -322,14 +401,23 @@ UNIT
 
 printf '\n[5/5] 验证配置、服务与监听端口\n'
 xray_read
-xray_validate "$XRAY_CONFIG" || { xray_error '正式配置校验失败。'; exit 1; }
-systemctl daemon-reload
-systemctl enable xray >/dev/null 2>&1
-systemctl restart xray >/dev/null 2>&1 || { xray_error 'Xray 启动失败，请检查 systemd 服务状态。'; exit 1; }
-xray_health || { xray_error 'Xray 服务或指定端口监听检查失败。'; exit 1; }
-xray_effective
-printf '\nXray 安装完成！\n配置校验：通过\n服务状态：运行中\n开机启动：已启用\n监听端口：TCP %s\n配置权限：仅 root 可读，服务账户为 root\n' "$XRAY_PORT"
-printf '本工具已完成本地监听和防火墙检查；公网可达性与 REALITY 客户端连接仍需从外部验证。\n\n'
+# shellcheck disable=SC2329 # 通过 trap 或 run_step 间接调用。
+start_and_check() {
+    xray_validate "$XRAY_CONFIG" || { xray_error '正式配置校验失败。'; return 1; }
+    systemctl daemon-reload
+    systemctl enable xray >/dev/null 2>&1
+    systemctl restart xray >/dev/null 2>&1 || { xray_error 'Xray 启动失败，请检查 systemd 服务状态。'; return 1; }
+    xray_health || { xray_error 'Xray 服务或指定端口监听检查失败。'; return 1; }
+    xray_effective
+}
+run_step 'systemd 启动及配置、服务与监听检查' "$work/service.log" start_and_check
+printf '\n====================================\n         Xray 部署成功\n====================================\n\n'
+printf '✓ Xray 服务运行正常\n✓ systemd 开机启动已启用\n✓ TCP %s 正在监听\n✓ 本地防火墙检查完成\n' "$XRAY_PORT"
+printf '本工具完成了本地检查；公网可达性与 REALITY 客户端连接仍需从外部验证。\n\nVLESS 连接：\n'
 /root/xray-link
+printf '\n客户端二维码：\n'
 /root/xray-qrcode
+printf '\n部署完成，可以关闭终端。\n'
+# 管道模式已将标准输入切换到终端，必须显式退出，避免 Bash 继续读取命令。
+exit 0
 }
