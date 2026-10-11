@@ -1,10 +1,10 @@
 # Debian 12 Xray 一键部署工具
 
-使用 Bash、Xray-core 官方稳定版、VLESS + REALITY、TCP、`xtls-rprx-vision` 和 systemd。仅支持 Debian 12 Bookworm，请以 root 运行。
+使用 Xray-core 官方稳定版、VLESS + REALITY、TCP、`xtls-rprx-vision` 和 systemd。仅支持 Debian 12 Bookworm，以 root 运行。一个入站支持 IPv4/IPv6；连接地址在生成链接或二维码时选择，不保存“默认 IP”。
 
 ## 安装
 
-完整下载此仓库，保持以下五个文件在同一目录：
+完整下载本仓库，保持以下五个文件在同一目录：
 
 ```text
 install.sh
@@ -14,7 +14,7 @@ xray-reconfigure
 README.md
 ```
 
-本仓库为 Public。Debian 12 服务器已安装 Git 时，以 root 执行：
+已安装 Git 的服务器可以执行：
 
 ```bash
 git clone https://github.com/WattPrinter/xray-deploy.git
@@ -22,69 +22,39 @@ cd xray-deploy
 bash install.sh
 ```
 
-也可以通过 SCP 将这五个文件上传到服务器后运行安装器。本地执行时，仍需保持三个管理脚本与安装器在同一目录。
+也可以通过 SCP 上传这五个文件，在任意目录以绝对路径运行安装器。路径可包含空格；项目直接位于 `/root/` 时也支持同文件安装。安装后可以删除源目录，服务与管理工具使用安装后的绝对路径。
 
 ### curl 一键安装
 
-在 Debian 12 的 root SSH 交互终端执行（需已安装 `curl` 和 `ca-certificates`）：
+在 root SSH 交互终端运行，需已安装 `curl` 和 `ca-certificates`：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/WattPrinter/xray-deploy/main/install.sh | bash
 ```
 
-安装器通过标准输入执行时，先完整解析代码，再从 `/dev/tty` 读取密码及后续交互输入；无交互终端时会停止。密码正确后，在权限仅允许当前用户访问的随机临时目录下载三个管理脚本，并检查非空、SHA-256 和 Bash 语法。全部验证通过后才进入原有 apt、配置和部署流程。下载失败、校验失败、安装结束或失败退出时删除临时目录，不留下临时脚本。
+安装器先完整解析代码块，再从 `/dev/tty` 读取交互输入，无交互终端时停止。密码正确后，将三个管理脚本下载至安全临时目录，验证非空、SHA-256 和 Bash 语法。管理脚本固定来自提交 `8c88aac953c3a3fedb7b9e40c0701fa56c8c65fe`，与当前仓库中的三个脚本完全一致；维护时须同时更新快照和安装器中的哈希。本地安装读取同目录脚本。
 
-远程管理脚本固定来自提交 `6bf36a421e09fb30f2fb3afb9a71a4a5e0c1e5e5`，与当前安装器配套的三个管理脚本内容完全相同，并在安装器中固定对应校验值。因此下载期间 `main` 变化不会混入其他版本。后续维护如修改管理脚本，必须同步更新固定快照和校验值。
+密码每个字符显示 `*`，支持 Backspace、Enter、Ctrl+C 和 Ctrl+D，最多尝试三次。源码只保留原有盐和哈希；密码请向维护者获取。这是轻量使用门槛，并非访问控制。`--help` 不需要密码。旧 `v1.0.0` 不包含当前密码与 IPv6 改动，本次功能使用 `main`。
 
-本地执行仍从安装器自身目录读取管理脚本，不下载远程副本。两种入口均安装到 `/root/xray-link`、`/root/xray-qrcode` 和 `/root/xray-reconfigure`，重复安装继续保留已有身份参数。
+耗时步骤显示中文单行 Spinner，结束后显示成功或失败；标准输出非终端时显示普通中文日志。安装结束打印链接、二维码，随后以退出码 0 返回 shell，不等待输入。失败或取消清理工作进程和临时目录。
 
-交互终端的耗时步骤显示 `| / - \` 单行动画，结束后替换为 `✓ 步骤名称：已完成` 或 `✗ 步骤名称：失败`。输入密码及配置时不运行动画；标准输出不是终端时使用普通中文日志。进度包装只创建当前步骤的工作进程组，动画由安装器自身刷新；Ctrl+C、TERM、HUP 和错误退出会清理工作进程及临时目录，不停止 systemd 管理的 Xray 服务。
+安装器执行一次 `apt-get update`，安装 `curl`、`ca-certificates`、`openssl`、`jq`、`qrencode`、`iproute2`、`iptables`、`nftables`、`procps` 和 `unzip`。不安装面板、Docker、Python 或 Web 服务。apt 失败立即停止，原始诊断保存至 root-only 的 `/root/xray-deploy-apt.log`。
 
-完成后显示本地服务、开机启动、监听及防火墙结果，打印 VLESS 链接和终端二维码，然后提示“部署完成，可以关闭终端。”并以退出码 0 直接返回 shell，不等待额外输入。此前管道模式把标准输入切换到 `/dev/tty` 后，Bash 在外层代码块结束后继续读取终端命令；现已在最终输出后显式退出。这些本地检查不表示公网代理已经验证。
+### 地址、监听与首次配置
 
-安装器要求输入安装密码，每个字符只显示一个 `*`；Backspace 可删除最后一个字符及星号，Enter 提交，Ctrl+C 取消，Ctrl+D 结束输入。实际字符不回显，最多尝试三次。密码请向维护者获取；源码仅保存随机盐和 SHA-256 哈希。验证成功后才执行依赖安装和原有部署流程，`--help` 无需密码。三个管理工具的行为不变。
+安装时自动发现当前服务器地址，优先读取启用网卡的有效公网 IPv4 和全局 IPv6；没有本地公网 IPv4、但存在 IPv4 默认路由时，才通过 IPv4 HTTPS 服务查询出口地址。过滤内网、共享地址、环回及文档地址。NAT 出口地址不等于已建立入站映射，需管理员自行确认映射。只有一种地址族时正常安装；没有可用地址时给出中文错误。
 
-这是轻量使用门槛：修改源码即可绕过哈希验证，并非真正的访问控制，也不能保护公开源码或阻止离线猜测。
+安装过程只询问监听端口、REALITY 目标网站和安装确认，不询问连接 IP。默认端口 443、目标 `www.apple.com`；可选择 Microsoft、Cloudflare 或自定义域名。目标必须通过 TLS 1.3、证书和 SNI 检查，最终可用性仍以实际 REALITY 客户端连接为准。历史测试中 Microsoft 在该环境下通过 TLS 基础检查但 REALITY 握手失败，Apple 和 Cloudflare 成功。
 
-现有 `v1.0.0` 是此前发布的版本，不含安装密码验证；新增验证目前应使用 `main` 分支。不会覆盖已发布的正式版本。
+存在全局 IPv6 时使用单个 `listen: "::"` 入站，同时接收 IPv6 和 IPv4；IPv4-only 主机沿用 `0.0.0.0`。不设置 `sockopt.v6only`，不修改系统全局 IPv6 内核参数。[官方监听说明](https://xtls.github.io/en/config/inbound.html)解释了通配地址及 `v6only` 的行为。TCP 使用 `network: "raw"`，REALITY 使用 `target`；分享链接使用 `type=tcp` 和 `pbk`。
 
-也可以下载正式版本的 [Source code ZIP](https://github.com/WattPrinter/xray-deploy/archive/refs/tags/v1.0.0.zip)，在本机上传 VPS（替换服务器地址）：
+确认后调用 [XTLS 官方安装器](https://github.com/XTLS/Xray-install) 安装最新稳定版，不下载地理数据，按原有方式生成 UUID、X25519 密钥和 16 位十六进制 Short ID。需服务器能访问 GitHub API 和 Release 下载地址。IPv6-only 网络如果无法访问这些 IPv4-only 下载端点，官方在线安装会失败；本工具没有额外下载代理。可由管理员下载并校验官方发行 ZIP，再使用官方安装器的 `--local` 方式准备核心。自动地址发现支持 IPv6-only，不代表上游下载服务支持 IPv6。
 
-```bash
-scp xray-deploy-1.0.0.zip root@服务器地址:/root/
-```
+### 已有安装与升级
 
-随后登录 Debian 12 VPS，以 root 解压并安装：
+重复安装保留现有身份、端口、目标及核心版本。旧版单客户端 IPv4 通配监听在发现 IPv6 后只升级 `listen` 为 `::`，候选通过核心校验后应用；升级启动或健康检查失败会恢复原配置和服务。不会因启用 IPv6 重新生成身份。
 
-```bash
-apt-get update
-apt-get install -y --no-install-recommends unzip
-unzip /root/xray-deploy-1.0.0.zip -d /root/
-bash /root/xray-deploy-1.0.0/install.sh
-```
-
-上述手动准备解压工具的命令独立于安装器；安装器自身的 apt 操作仍在密码验证成功后执行。
-
-项目可以放在 Debian 12 的任意目录，包括含空格的目录及 `/root/`。安装器使用 `${BASH_SOURCE[0]}` 定位自身目录，再读取同目录的三个管理脚本，不依赖运行命令时的当前工作目录。例如，项目位于 `/opt/xray-deploy/` 时，可以从其他目录调用：
-
-```bash
-cd /tmp
-bash /opt/xray-deploy/install.sh
-```
-
-安装后管理脚本是 `/root/` 下的独立文件；如果项目本身就在 `/root/`，安装器只为同一文件设置执行权限，避免将文件复制到自身。Xray 核心、配置及 systemd 启动命令均使用安装后的绝对路径。安装完成后可以删除原项目目录，Xray 服务和三个管理工具仍可正常使用；以后重新执行安装器时，再获取完整项目即可。
-
-安装器先执行一次 `apt-get update`，然后一次性安装必要依赖：`curl`、`ca-certificates`、`openssl`、`jq`、`qrencode`、`iproute2`、`iptables`、`nftables`、`procps` 和 `unzip`。不安装面板、Docker、Python 或 Web 服务。依赖安装失败立即停止。
-
-apt 失败时使用中文报告，并将原始诊断输出保存到仅 root 可读的 `/root/xray-deploy-apt.log`，便于检查锁占用、软件源或网络问题。该文件只在失败时产生，不含 Xray 身份参数。
-
-首次安装依次询问端口、REALITY 目标网站和公网 IPv4。默认端口为 443，默认目标为 `www.apple.com`。也可以选择 Microsoft、Cloudflare 或自定义域名。所有目标都必须通过本机 TLS 1.3 握手、证书验证和 SNI 检查；该检查不代替 REALITY 客户端测试。
-
-公网 IPv4 自动检测只接受有效公网地址，排除内网、共享地址及环回地址。检测失败必须手动输入。不支持仅有 IPv6 或没有入站映射的共享 IPv4 服务器。自动检测得到的出口地址也可能经过 NAT；此时必须自行确认公网入站映射，并输入正确地址。端口已被其他程序占用时重新选择，不会停止占用程序。
-
-显示配置摘要并确认后，安装器通过 [XTLS 官方安装器](https://github.com/XTLS/Xray-install) 安装最新非预发布稳定版，不下载无关的地理数据。首次安装自动生成 UUID、X25519 密钥和 16 位十六进制 Short ID。
-
-依据[当前官方 REALITY 配置](https://xtls.github.io/en/config/transports/reality.html)，服务端使用 `target`（旧名称为 `dest`），TCP 传输使用 `network: "raw"`。分享链接仍使用客户端 URI 参数 `type=tcp` 和 `pbk`。这两种表示对应同一个 TCP + REALITY 连接方案。
+只管理一个 VLESS + REALITY 入站、一个 Vision 客户端和一个 Short ID。无效配置、多 REALITY 入站、多客户端、多配置入口、指定地址绑定或明确的 `sockopt.v6only: true` 会停止自动升级并保留文件，需管理员处理。已有 `::` 不因暂时缺少 IPv6 地址而降级。
 
 ## 安装后的文件
 
@@ -93,71 +63,75 @@ apt 失败时使用中文报告，并将原始诊断输出保存到仅 root 可�
 /root/xray-qrcode
 /root/xray-reconfigure
 /usr/local/etc/xray/config.json
-/usr/local/etc/xray/deploy.json
 /etc/systemd/system/xray.service.d/20-xray-deploy.conf
 ```
 
-`config.json` 是唯一的身份和协议参数来源。`deploy.json` 只记录服务器连接地址，不保存第二套 UUID、密钥、端口或目标网站。公钥通过 OpenSSL 从当前配置中的私钥推导，不另行保存。
+`config.json` 是唯一的身份和协议参数来源。公钥通过 OpenSSL 从当前私钥推导，不另行保存。三个管理工具不读取或创建 `deploy.json`；成功安装后移除只含旧 `server_ip` 字段的该文件，含其他字段的文件保留。
 
-配置目录权限为 700，配置及元数据为 600，三个管理脚本为 700，全部归 root 所有。通过官方 systemd 单元的补充配置让 Xray 以 root 读取这些文件。启动后在 `/run/xray-deploy/config.sha256` 保存所加载配置的校验值，连接工具会检查它；如果手动编辑配置但未重启服务，工具会停止输出链接并给出中文提示。
-
-本工具管理一个 VLESS + REALITY 入站、一个客户端和一个 Short ID。其他入站和其他配置项在身份重置时保留。对于多客户端、多 REALITY 入站、多配置文件或无效的现有配置，安装器停止并保留文件，不尝试自动迁移。
+配置目录权限 700、配置 600、工具 700，归 root 所有。沿用官方 systemd 单元，通过补充配置以 root 读取配置。服务启动在 `/run/xray-deploy/config.sha256` 记录所加载配置校验值；手动改配置而未重启时，工具拒绝输出过时链接。安装和重置共用 `flock` 锁。重复安装会重启服务，产生短暂连接中断。
 
 ## 管理工具
 
-显示可导入 v2rayN 的完整 VLESS 分享链接：
+### 分享链接
 
 ```bash
 /root/xray-link
 ```
 
-本次输出临时使用另一个公网 IPv4，不修改保存的地址：
+每次执行重新发现当前地址。两个地址族同时存在时，菜单输出到 stderr：
+
+```text
+请选择连接地址：
+
+  1. IPv6：xxxx:xxxx::xxxx（默认）
+  2. IPv4：xxx.xxx.xxx.xxx
+
+请选择 [1]:
+```
+
+回车选 IPv6，输入 `2` 选 IPv4。只有一个地址时直接使用，不显示菜单。无可用地址时不输出 URI。非交互执行可以明确传入地址：
 
 ```bash
 /root/xray-link 你的公网IPv4
+/root/xray-link 你的全局IPv6
 ```
 
-链接包含 UUID、地址、端口及 `type`、`security`、`flow`、`sni`、`pbk`、`sid`、`fp`，查询参数和节点名称正确进行 URI 编码。该命令不修改配置，不生成新身份，也不输出私钥。
+URI 单独输出到 stdout，提示输出到 stderr。IPv6 使用 `@[IPv6]:端口` 方括号形式；链接包含当前有效的 UUID、publicKey、Short ID、SNI、flow 和端口，以及 `type`、`security`、`fp`。查询参数与节点名称正确进行 URI 编码。显式地址只用于本次输出，不校验入站可达性，不修改服务配置和身份。
 
-显示终端二维码：
+### 二维码
 
 ```bash
 /root/xray-qrcode
-# 同样允许本次指定连接地址
-/root/xray-qrcode 你的公网IPv4
+/root/xray-qrcode 你的全局IPv6
 ```
 
-二维码工具直接调用连接工具，再把同一条链接交给 `qrencode`，没有独立配置。普通支持 UTF-8 和 ANSI 颜色的 SSH 终端即可显示；字体应等宽。
+二维码使用 `xray-link` 的公共地址发现和选择函数，一次选择后以显式地址调用连接工具，将同一 URI 交给 `qrencode`，不会再次弹出菜单。支持 IPv6 URI。UTF-8、ANSI 颜色和等宽字体的终端可显示二维码。
 
-重置身份：
+### 身份重置
 
 ```bash
 /root/xray-reconfigure
 ```
 
-默认取消，必须输入 `y` 确认。确认后只更改 UUID、REALITY 私钥及 Short ID，公钥从新私钥推导。端口、目标、`serverNames`、`flow` 及其他配置项保持原样。候选配置校验通过后原子替换并重启服务，检查服务和该进程的 TCP 监听。候选校验失败不动原配置；替换后启动或监听检查失败则恢复原配置并重启原服务。
+默认取消，输入 `y` 后重新生成 UUID、REALITY X25519 密钥和 Short ID。其余配置保持原样，公钥从新私钥推导。候选校验成功后原子替换并重启；启动或监听检查失败则恢复原配置和服务。恢复失败时保留备份并报告路径。
 
-成功时按要求在当前终端显示新的全部身份参数（包含私钥）、分享链接和二维码。不要将该终端输出上传到仓库、公开日志或公开工单。工具不把密钥发送给 systemd journal。若回滚服务失败，工具报告保留备份的路径，应按提示手动恢复。
+成功后显示新参数、链接和二维码；有两个地址族时只选择一次 IP，链接与二维码共用该次选择。没有切换服务 IP 的菜单，不保存默认地址。成功输出包含私钥，请勿上传或写入公开日志。
 
-所有工具均支持 `--help`。重新运行安装器可以补齐管理工具及依赖，保留现有配置、身份、端口和目标；不自动升级现有核心。安装和身份重置共用 `flock` 锁，避免并发修改。安装器会重启现有服务以应用服务补充配置，因此有短暂连接中断。
+三个工具均支持 `--help`。
 
-## 防火墙与连接验证
+## 防火墙与外部验证
 
-只处理用户选择的 Xray TCP 端口：
+只处理选定的 Xray TCP 端口，保留 SSH 和其他规则：
 
-- 已启用 UFW：在用户规则前部添加对应的持久化 TCP 放行规则，保留 SSH 和其他规则。
-- 简单 iptables：只支持标准 INPUT 链、不包含自定义入站跳转，并且已有启用的 `netfilter-persistent`；独立 systemd 单元在原规则恢复后重放本端口规则。
-- 简单 nftables：只支持一个 `inet` 输入基础链，已有启用且语法有效的 `/etc/nftables.conf`；同样通过独立 systemd 单元重放本端口规则。
-- 没有生效的本地入站过滤规则：不额外开启防火墙。
-- 混合防火墙、多输入链或无法可靠识别的规则：使用中文报告并停止，请管理员手动处理目标端口。
+- 启用 UFW：在用户规则前部持久化放行 IPv4/IPv6；发现 IPv6 但 UFW 未启用 IPv6 管理时报告错误，不修改全局设置。
+- 简单 iptables：标准 INPUT 链，已有启用的 `netfilter-persistent`；分别使用 iptables/ip6tables 放行，独立单元在恢复原规则后重放。
+- 简单 nftables：一个 `inet` 输入基础链，已有启用且语法有效的 `/etc/nftables.conf`，一个 TCP 规则同时覆盖两个地址族。
+- 没有生效的入站过滤规则：不额外开启防火墙。
+- 混合或无法识别的规则：报告中文错误并停止。
 
-需要独立持久化时，额外安装 `/usr/local/libexec/xray-deploy-firewall` 及 `/etc/systemd/system/xray-deploy-firewall.service`，只保存本工具的放行操作，不清空或导出整套防火墙。不要在 Xray 运行时另行重载原防火墙而不重放规则；如有重载，执行 `systemctl restart xray-deploy-firewall` 后重新验证端口。
+需要重放时安装 `/usr/local/libexec/xray-deploy-firewall` 和 `xray-deploy-firewall.service`，不导出或清空原规则。另行重载防火墙后应重启该单元并验证端口。Vultr Cloud Firewall 独立管理，本工具不调用云 API；若启用，需在控制台放行对应地址族的 TCP 端口。
 
-Vultr Cloud Firewall 由云平台独立管理，本工具没有 Vultr API 授权，不修改云防火墙。如果已启用，请在控制台放行所选 TCP 端口。
-
-安装器实际检查：Xray 配置校验、systemd 开机启动、服务 active、所选 TCP 端口由 Xray 主进程监听、本地防火墙处理。它不会把这些检查解释为公网可达或 REALITY 客户端连接成功。
-
-部署后应从另一台设备导入链接，实际通过代理访问 HTTPS 网站，并在 VPS 重启后再次验证。这才能检查云防火墙、路由及 REALITY 端到端通信。
+安装器检查配置、systemd active、开机启用、Xray 主进程监听及本地防火墙；这些检查不能替代外部 REALITY 请求。部署后从另一台设备导入链接，通过代理访问 HTTPS，并在重启后再验证。
 
 ```bash
 systemctl is-active xray
@@ -165,60 +139,32 @@ systemctl is-enabled xray
 ss -lntp
 ```
 
-## 当前开发测试记录
+## 本轮 IPv6 测试（2026-10-11）
 
-以下记录来自真实 Vultr Debian 12 测试机，使用 Xray 官方稳定版 v26.3.27。初始机器没有 Xray 配置，UFW 已启用且只开放 SSH。除特别注明外，均已实际执行。
+新 Vultr Debian 12 测试机使用官方 Xray-core v26.3.27、UFW 和单个 `listen: "::"` 入站。网卡 IPv4 属于 `100.64.0.0/10` 共享范围且没有 IPv4 默认路由，仅全局 IPv6 可用。该地址未被当作公网 IPv4。未修改全局 IPv6 内核参数。
 
-| 验证项目 | 实际结果 |
+| 项目 | 结果 |
 | --- | --- |
-| 首次安装、apt 依赖与官方核心安装 | 通过 |
-| 最终默认交互参数：443、Apple、自动公网 IPv4、回车确认 | 通过 |
-| 自定义端口 8443、自定义输入 `www.cloudflare.com` | 通过 |
-| 端口越界、SSH 端口占用、错误域名、内网地址及确认输入纠错 | 通过，中文提示后可重新输入，SSH 保持正常 |
-| 官方核心配置校验、systemd active、开机启用、Xray 主进程监听 | 通过 |
-| 配置、元数据及管理脚本的 root 权限 | 通过 |
-| UFW 为所选端口持久化放行且保留 SSH | 通过 |
-| 分享链接、公钥推导、临时指定连接地址不写回配置 | 通过 |
-| SSH 终端二维码生成 | 通过 |
-| 重复安装与缺失二维码脚本修复 | 通过，配置和地址元数据的前后校验值完全一致 |
-| 身份重置默认取消 | 通过，身份不变 |
-| 确认后重置身份并重启服务 | 通过，仅 UUID、私钥和 Short ID 改变，公钥随私钥变化 |
-| 无效私钥候选的失败保护 | 通过，在临时测试副本中注入无效候选，原配置及原运行进程不变 |
-| 语法有效但实际无法启动的候选回滚 | 通过，在临时测试副本中令候选绑定被 SSH 占用的 22；启动失败后恢复原配置、原身份及正常服务，未停止 SSH |
-| 手动修改配置但未重启时拒绝输出过时链接 | 通过 |
-| 任意项目目录与跨工作目录调用 | 通过，在含空格的 `/opt/` 项目目录安装，从 `/tmp` 以绝对路径及 `/var/tmp` 以相对路径调用，配置与身份校验值未变 |
-| 项目直接位于 `/root/` | 通过，复现并修复同文件复制问题，部署逻辑及身份不变 |
-| 删除安装源目录后的管理工具与服务重启 | 通过，分享链接、终端二维码、身份重置默认取消及 Xray 重启均正常 |
-| 实际重启 VPS 后 Xray 自动运行、443 监听、UFW 放行及身份保留 | 通过，以启动标识变化确认实际重启，配置与元数据校验值未变 |
-| 重启后的公网独立客户端请求、二维码与私钥不进入 journal | 通过，当前及测试中旧私钥均未在服务日志中出现 |
-| 本机独立官方 Xray 客户端通过公网链接代理 HTTPS | 443 + Apple、443 + Cloudflare、8443 + Cloudflare 均通过，代理出口与 VPS 一致 |
-| 本机 Bash 语法及 ShellCheck | 通过，ShellCheck 仅忽略固定运行时 source 路径的 SC1091 |
+| 自动识别地址 | 实测通过，识别全局 IPv6，排除共享 IPv4 |
+| 单入站双地址族监听 | 实测通过，IPv6 公网和 SSH 转发到服务器 IPv4 回环的客户端均完成真实 REALITY + Vision HTTPS |
+| IPv6 公网代理 HTTPS | 实测通过，返回的 IPv6 出口与 VPS 一致 |
+| IPv4 公网代理 HTTPS | 无法测试，本机没有公网 IPv4；IPv4 回环转发通过不等同于公网 IPv4 验证 |
+| IPv6 默认、手选 IPv4 | 同一实际工具通过双地址测试 fixture 验证；不是公网 IPv4 连接测试 |
+| 单一地址族 | IPv6-only 实机自动选择通过；IPv4-only fixture 通过 |
+| IPv6 URI 解析、身份字段 | 实测通过，解析生成的 URI 并构造真实客户端请求 |
+| 二维码只选择一次 | 实际二维码工具加双地址 fixture 通过，共享选择且编码与链接一致 |
+| 身份重置及新链接 | 实测通过，仅身份字段变化；新链接和二维码只选择一次地址 |
+| 旧 IPv4-only 配置升级 | 实测通过，仅监听地址改变，身份和其他配置完全保持 |
+| 双栈升级失败恢复 | 实测通过，注入一次重启失败后原配置逐字节恢复，服务正常 |
+| 重复安装身份不变 | 实测通过，本地重复安装与 curl 重复安装均保留完整配置和身份 |
+| curl 安装与正常退出 | 候选 curl 管道实测通过，GitHub 固定快照下载和哈希校验通过，退出码 0 |
+| VPS 实际重启后 | 实测通过，启动标识变化、完整配置不变；开机服务、防火墙、IPv6 公网 HTTPS 及 IPv4 回环转发均复验通过 |
+| Bash 语法、ShellCheck | 通过 |
 
-首次实验的 Microsoft 目标通过了 TLS 1.3 基础检查，但同一环境中的 REALITY 握手失败；改用 Apple 和 Cloudflare 后真实代理请求成功。因此最终默认目标为 Apple，Microsoft 保留为可选项。基础 TLS 检查无法保证每个地域、DNS 返回的边缘节点和客户端组合都可用于 REALITY，应以实际客户端测试为准。
+该 IPv6-only 测试机无法直接访问 GitHub Release 的 IPv4 下载端点，官方在线核心安装失败；测试使用已校验官方 ZIP 和官方 `--local` 安装器准备核心后验证部署、升级及重复安装。未将其记为全新在线安装通过。此前 IPv4 VPS 的在线首次安装和公网 REALITY 请求已有历史验收，本轮未在另一台公网 IPv4 VPS 重跑。
 
-测试期间出现过 apt 安装失败，安装器立即停止，单独及随后重新运行均成功；最初失败的临时日志未保留，因此未确定原因。最终版本已补充 root-only 的失败诊断日志。
+本轮没有实测 v2rayN GUI 扫码及原生 iptables/nftables 管理分支；实际防火墙走 UFW 分支。
 
-尚未实测：v2rayN 图形界面导入与扫码、原生 nftables/iptables 管理分支、Vultr 云防火墙 API 管理。分享链接已由独立 Xray 客户端使用；当前测试机实际走 UFW 分支。云防火墙没有授权，不执行 API 修改。
+## 仓库内容
 
-## 本次退出、进度与密码测试
-
-以下项目在已有有效配置的 Debian 12 VPS 上通过真实 SSH TTY 验证。候选管道安装器由 curl 读取测试机上的候选文件，三个管理脚本从 GitHub 固定提交实际下载；发布后再验证公开 `main` 下载入口。
-
-| 验证项目 | 实际结果 |
-| --- | --- |
-| 本地跨目录重复安装、curl 管道重复安装 | 退出码 0，完整打印链接与二维码，恢复 shell 提示符 |
-| 密码星号、Backspace、正确密码、错误后重试、三次失败 | 通过，实际密码字符不出现在输出中 |
-| 密码 Ctrl+C、Ctrl+D | 分别退出 130、1；恢复终端回显和 shell |
-| 步骤 Spinner 与 Ctrl+C | 单行刷新；取消返回 130，工作及孙进程消失，临时目录与安装锁清理 |
-| apt 与 curl 故障注入 | 通过，退出码 42、22 正确传递；动画停止，失败后退出 |
-| 步骤函数中途失败 | 退出码 1，未执行后续命令，错误未被包装函数吞掉 |
-| 非 TTY 进度、临时候选生成及真实核心校验 | 普通中文日志无动画，候选通过真实 Xray 核心校验，未写入正式配置 |
-| 重复安装和取消后身份保留 | 配置及地址元数据校验值不变，服务保持 active |
-| 独立官方 Xray 客户端代理 HTTPS | 通过，出口地址与测试 VPS 一致 |
-| Bash 语法及 ShellCheck | 通过；仅注释说明动态调用函数与固定运行时 source 的检查例外 |
-
-本次保留了现有配置，没有在另一台全新 Debian 12 上重新执行首次部署；首次部署的历史测试记录见上节。三个管理脚本保持不变。当前安装器新增的配置生成进度路径已用临时文件及真实核心校验单独验证。
-
-## 上传 GitHub 前
-
-只上传上述五个源码与文档文件。不要上传 SSH 密码、SSH 密钥、服务器真实配置、`deploy.json`、实际 UUID、REALITY 密钥、测试输出或备份。测试 VPS 的工作配置可保留在 VPS 上。仓库示例不含实际凭据；发布前请再次确认暂存区文件清单。
+只提交上述五个源码和文档文件。不提交 VPS 凭据、真实 UUID、REALITY 私钥、服务器配置、测试输出或恢复备份。测试和私有参数留在本地或测试 VPS。

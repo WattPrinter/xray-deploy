@@ -23,6 +23,7 @@ fi
 work=''
 active_pid=''
 progress_active=0
+listener_upgraded=0
 # shellcheck disable=SC2329 # 通过 trap 或 run_step 间接调用。
 cleanup() {
     local status=$?
@@ -32,6 +33,14 @@ cleanup() {
         wait "$active_pid" 2>/dev/null || true
     fi
     if (( progress_active )); then printf '\r\033[2K'; fi
+    if (( listener_upgraded )); then
+        if install -m 600 "$work/previous.json" "$XRAY_CONFIG" && systemctl restart xray && xray_health; then
+            printf '错误：双栈升级失败，已恢复原配置和服务。\n' >&2
+        else
+            printf '错误：恢复服务失败，原配置备份保存在 %s/previous.json。\n' "$work" >&2
+            exit 1
+        fi
+    fi
     [[ -z $work ]] || rm -rf "$work"
     exit "$status"
 }
@@ -129,15 +138,15 @@ if [[ -n $installer_source ]]; then
 else
     command -v curl >/dev/null || { printf '错误：管道安装需要 curl，请先安装 curl 和 ca-certificates。\n' >&2; exit 1; }
     # 此快照的三个管理脚本与本版本所附文件完全相同，按固定提交及校验值下载。
-    helper_revision=6bf36a421e09fb30f2fb3afb9a71a4a5e0c1e5e5
+    helper_revision=8c88aac953c3a3fedb7b9e40c0701fa56c8c65fe
     script_dir=$work
     # shellcheck disable=SC2329 # 通过 trap 或 run_step 间接调用。
     download_helpers() {
         for script in xray-link xray-qrcode xray-reconfigure; do
             case $script in
-                xray-link) expected=b2ce11dd0db0f4f0dadb79556cbf842fdf9f8e566e98de095479c786711aeeb4 ;;
-                xray-qrcode) expected=21703a340402a8796a063647564b4f7acd7af41302aaf142616971ad41f42421 ;;
-                xray-reconfigure) expected=f1d3e6d6111c05c496b67e628f9d5e102f2546e881c52a0b3c7b406ffa73f476 ;;
+                xray-link) expected=70d1054655a5ae080aaec42cb94ed2d4faf76e6a8070f6f00e7588cf76abfd80 ;;
+                xray-qrcode) expected=fffb708bce856032db3fb90958a950121f5918934d63d6fb19e7fa8ba65730fb ;;
+                xray-reconfigure) expected=5293998b4a7c1a7275b623550d5a72ae64c55c130088a19d164e0a416f9edff9 ;;
             esac
             curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 \
                 "https://raw.githubusercontent.com/WattPrinter/xray-deploy/$helper_revision/$script" \
@@ -167,21 +176,6 @@ run_step '更新软件索引' "$work/apt.log" apt-get update
 run_step '安装必要依赖' "$work/apt.log" \
     apt-get install -y --no-install-recommends curl ca-certificates openssl jq qrencode iproute2 iptables nftables procps unzip
 
-ask_ip() {
-    local detected='' value endpoint
-    for endpoint in https://api.ipify.org https://ipv4.icanhazip.com; do
-        detected=$(curl --noproxy '*' -4fsS --connect-timeout 5 --max-time 10 "$endpoint" 2>/dev/null) || detected=''
-        if xray_ipv4 "$detected"; then break; fi
-        detected=''
-    done
-    [[ -n $detected ]] || printf '公网 IPv4 自动检测失败，请手动输入；不会使用共享或未经验证的地址。\n'
-    while true; do
-        read -r -p "请输入服务器公网 IPv4 [${detected:-请手动输入}]: " value || { xray_error '输入结束，已停止。'; return 1; }
-        value=${value:-$detected}
-        if xray_ipv4 "$value"; then server_ip=$value; return 0; fi
-        printf '输入错误：请输入有效的公网 IPv4 地址。\n'
-    done
-}
 ask_port() {
     local value
     while true; do
@@ -233,6 +227,9 @@ firewall() {
         # 额外的原生入站链可能在 UFW 之后再次丢弃数据包，不能声称已放行。
         if jq -e '.[] | select(.table != "filter" or (.name != "INPUT" and .name != "PREROUTING"))' <<< "$chains" >/dev/null; then
             xray_error 'UFW 与其他入站防火墙链并存，无法可靠确认放行方式，请手动处理所选端口。'; return 1
+        fi
+        if [[ -n $XRAY_IPV6 ]] && ! grep -Eq '^IPV6=yes$' /etc/default/ufw; then
+            xray_error 'UFW 未启用 IPv6 管理，请先配置 IPv6 防火墙；未声称双栈端口已放行。'; return 1
         fi
         LC_ALL=C ufw insert 1 allow "$port/tcp" >"$work/firewall.log" 2>&1 || { xray_error 'UFW 添加 TCP 放行规则失败。'; return 1; }
         printf 'UFW：已在用户规则前部持久化放行 TCP %s（保留原规则及 SSH）。\n' "$port"
@@ -299,6 +296,12 @@ UNIT
     printf '%s：已为 TCP %s 添加独立的开机放行规则，未覆盖原有规则。\n' "$backend" "$port"
 }
 
+xray_discover_addresses
+[[ -n $XRAY_IPV4 || -n $XRAY_IPV6 ]] || { xray_error '未找到可用的公网 IPv4 或全局 IPv6。'; exit 1; }
+listen=0.0.0.0
+[[ -z $XRAY_IPV6 ]] || listen=::
+printf '当前可用地址：IPv4 %s；IPv6 %s\n' "${XRAY_IPV4:-无}" "${XRAY_IPV6:-无}"
+
 printf '\n[2/5] 基本配置\n'
 existing=0
 if [[ -s $XRAY_CONFIG ]]; then
@@ -316,19 +319,17 @@ if [[ -s $XRAY_CONFIG ]]; then
         [[ $pid != 0 && $(ss -H -ltnp "sport = :$port") == *"pid=$pid,"* ]] ||
             { xray_error "端口 $port 被其他进程占用，已停止。"; exit 1; }
     fi
-    printf '检测到有效安装，保留原 UUID、密钥、Short ID、端口及目标网站。\n'
-    if [[ -s $XRAY_META ]]; then
-        server_ip=$(jq -er '.server_ip' "$XRAY_META" 2>/dev/null) || { xray_error '地址元数据无效，请手动修复。'; exit 1; }
-        xray_ipv4 "$server_ip" || { xray_error '地址元数据不是有效的公网 IPv4。'; exit 1; }
-    else
-        printf '仅需补全缺失的服务器地址记录。\n'
-        ask_ip
+    old_listen=$(jq -r --argjson i "$XRAY_INDEX" '.inbounds[$i].listen // "0.0.0.0"' "$XRAY_CONFIG")
+    if [[ $old_listen != 0.0.0.0 && $old_listen != :: ]] ||
+        jq -e --argjson i "$XRAY_INDEX" '.inbounds[$i].streamSettings.sockopt.v6only == true' "$XRAY_CONFIG" >/dev/null; then
+        xray_error '现有配置限制了监听地址或仅 IPv6，无法安全自动升级，已保留原配置。'; exit 1
     fi
+    printf '检测到有效安装，保留原 UUID、密钥、Short ID、端口及目标网站。\n'
+
 else
     ask_port
     ask_target
-    ask_ip
-    printf '\n------------------------------------\n配置确认\n\n监听端口：%s\n目标网站：%s\n服务器 IP：%s\n\n' "$port" "$target" "$server_ip"
+    printf '\n------------------------------------\n配置确认\n\n监听端口：%s\n目标网站：%s\n\n' "$port" "$target"
     while true; do
         read -r -p '确认开始安装？[Y/n]: ' answer || exit 1
         case $answer in
@@ -358,9 +359,9 @@ if (( ! existing )); then
     # shellcheck disable=SC2329 # 通过 trap 或 run_step 间接调用。
     generate_config() {
         xray_identity
-        jq -n --argjson port "$port" --arg target "$target" --arg uuid "$XRAY_UUID" --arg private "$XRAY_PRIVATE" --arg sid "$XRAY_SID" '{
+        jq -n --arg listen "$listen" --argjson port "$port" --arg target "$target" --arg uuid "$XRAY_UUID" --arg private "$XRAY_PRIVATE" --arg sid "$XRAY_SID" '{
             log: {loglevel:"warning"},
-            inbounds: [{listen:"0.0.0.0",port:$port,protocol:"vless",settings:{
+            inbounds: [{listen:$listen,port:$port,protocol:"vless",settings:{
                 clients:[{id:$uuid,flow:"xtls-rprx-vision"}],decryption:"none"},
                 streamSettings:{network:"raw",security:"reality",realitySettings:{
                     show:false,target:($target+":443"),xver:0,serverNames:[$target],privateKey:$private,shortIds:[$sid]}}}],
@@ -370,7 +371,15 @@ if (( ! existing )); then
     run_step '生成并校验 REALITY 配置' "$work/config.log" generate_config
     install -m 600 "$work/candidate.json" "$XRAY_CONFIG"
 else
-    printf '已保留现有 Xray 版本与配置；重复安装不自动升级核心。\n'
+    if [[ $old_listen != "$listen" && $listen == :: ]]; then
+        jq --argjson i "$XRAY_INDEX" '.inbounds[$i].listen = "::"' "$XRAY_CONFIG" > "$work/candidate.json"
+        xray_validate "$work/candidate.json" || { xray_error '双栈候选配置无效，原配置未改变。'; exit 1; }
+        cp -p "$XRAY_CONFIG" "$work/previous.json"
+        install -m 600 "$work/candidate.json" "$XRAY_CONFIG"
+        listener_upgraded=1
+        printf '仅升级通配监听为 ::，身份参数保持不变。\n'
+    fi
+    printf '已保留现有 Xray 版本和身份；重复安装不自动升级核心。\n'
 fi
 for script in xray-link xray-qrcode xray-reconfigure; do
     if [[ $script_dir/$script -ef /root/$script ]]; then
@@ -379,12 +388,9 @@ for script in xray-link xray-qrcode xray-reconfigure; do
         install -m 700 "$script_dir/$script" "/root/$script"
     fi
 done
-if [[ ! -s $XRAY_META ]]; then
-    jq -n --arg ip "$server_ip" '{server_ip:$ip}' > "$XRAY_META"
-fi
-chown root:root "$XRAY_DIR" "$XRAY_CONFIG" "$XRAY_META"
+chown root:root "$XRAY_DIR" "$XRAY_CONFIG"
 chmod 700 "$XRAY_DIR"
-chmod 600 "$XRAY_CONFIG" "$XRAY_META"
+chmod 600 "$XRAY_CONFIG"
 # root 读取 root-only 配置；沿用官方 unit，固定单一配置入口及启动指纹。
 install -d -m 755 /etc/systemd/system/xray.service.d
 cat > /etc/systemd/system/xray.service.d/20-xray-deploy.conf <<'UNIT'
@@ -411,12 +417,18 @@ start_and_check() {
     xray_effective
 }
 run_step 'systemd 启动及配置、服务与监听检查' "$work/service.log" start_and_check
+listener_upgraded=0
+# 旧地址元数据只含默认 IP；新工具不再读取或写入它。
+if [[ -f $XRAY_DIR/deploy.json ]] && jq -e 'keys == ["server_ip"]' "$XRAY_DIR/deploy.json" >/dev/null 2>&1; then
+    rm -f "$XRAY_DIR/deploy.json"
+fi
 printf '\n====================================\n         Xray 部署成功\n====================================\n\n'
 printf '✓ Xray 服务运行正常\n✓ systemd 开机启动已启用\n✓ TCP %s 正在监听\n✓ 本地防火墙检查完成\n' "$XRAY_PORT"
 printf '本工具完成了本地检查；公网可达性与 REALITY 客户端连接仍需从外部验证。\n\nVLESS 连接：\n'
-/root/xray-link
+address=${XRAY_IPV6:-$XRAY_IPV4}
+/root/xray-link "$address"
 printf '\n客户端二维码：\n'
-/root/xray-qrcode
+/root/xray-qrcode "$address"
 printf '\n部署完成，可以关闭终端。\n'
 # 管道模式已将标准输入切换到终端，必须显式退出，避免 Bash 继续读取命令。
 exit 0
