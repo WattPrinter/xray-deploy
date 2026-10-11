@@ -2,7 +2,6 @@
 # 同时作为其他三个脚本的公共函数库；被 source 时不执行主程序。
 XRAY_DIR=/usr/local/etc/xray
 XRAY_CONFIG=$XRAY_DIR/config.json
-XRAY_META=$XRAY_DIR/deploy.json
 XRAY_BIN=/usr/local/bin/xray
 
 xray_error() { printf '错误：%s\n' "$*" >&2; return 1; }
@@ -23,6 +22,71 @@ xray_ipv4() {
        !(a == 192 && b == 168) && !(a == 192 && b == 0) &&
        !(a == 198 && (b == 18 || b == 19)) &&
        !(a == 198 && b == 51 && c == 100) && !(a == 203 && b == 0 && c == 113) ))
+}
+xray_ipv6() {
+    local ip=${1,,} expanded group compressed=0
+    local -a groups
+    [[ $ip =~ ^[[:xdigit:]:]+$ && $ip != *:::* ]] || return 1
+    if [[ $ip == *::* ]]; then
+        compressed=1
+        [[ ${ip#*::} != *::* ]] || return 1
+        expanded=${ip/::/:}
+        expanded=${expanded%:}
+    else
+        expanded=$ip
+        [[ $ip != *: ]] || return 1
+    fi
+    IFS=: read -r -a groups <<< "$expanded"
+    for group in "${groups[@]}"; do
+        [[ $group =~ ^[[:xdigit:]]{1,4}$ ]] || return 1
+    done
+    [[ ${groups[0]:-} =~ ^[23][[:xdigit:]]{3}$ ]] || return 1
+    # 只接受当前全球单播范围，排除文档地址。
+    [[ ! (${groups[0]} == 2001 && $((16#${groups[1]:-0})) == 3512) ]] || return 1
+    if (( compressed )); then (( ${#groups[@]} < 8 )); else (( ${#groups[@]} == 8 )); fi
+}
+xray_discover_addresses() {
+    local address endpoint
+    XRAY_IPV4=''
+    XRAY_IPV6=''
+    while IFS= read -r address; do
+        if xray_ipv4 "$address"; then XRAY_IPV4=$address; break; fi
+    done < <(ip -j -4 address show up scope global | jq -r '.[].addr_info[] | select(.scope == "global" and .preferred_life_time != 0) | .local // empty')
+    while IFS= read -r address; do
+        if xray_ipv6 "$address"; then XRAY_IPV6=$address; break; fi
+    done < <(ip -j -6 address show up scope global | jq -r '.[].addr_info[] | select(.scope == "global" and .preferred_life_time != 0 and (.tentative // false | not)) | .local // empty')
+    # NAT 环境没有本地公网 IPv4 时才查询出口；无 IPv4 默认路由则不查询。
+    if [[ -z $XRAY_IPV4 && -n $(ip -4 route show default) ]]; then
+        for endpoint in https://api.ipify.org https://ipv4.icanhazip.com; do
+            address=$(curl --noproxy '*' -4fsS --connect-timeout 3 --max-time 5 "$endpoint" 2>/dev/null) || address=''
+            if xray_ipv4 "$address"; then XRAY_IPV4=$address; break; fi
+        done
+    fi
+}
+xray_select_address() {
+    local address=${1:-} choice
+    if [[ -n $address ]]; then
+        xray_ipv4 "$address" || xray_ipv6 "$address" ||
+            { xray_error '连接地址必须是有效的公网 IPv4 或全局 IPv6。'; return 1; }
+        printf '%s\n' "$address"
+        return 0
+    fi
+    xray_discover_addresses
+    if [[ -n $XRAY_IPV6 && -n $XRAY_IPV4 ]]; then
+        while true; do
+            printf '\n请选择连接地址：\n\n  1. IPv6：%s（默认）\n  2. IPv4：%s\n\n请选择 [1]: ' "$XRAY_IPV6" "$XRAY_IPV4" >&2
+            IFS= read -r choice || { xray_error '输入结束，请显式传入连接地址。'; return 1; }
+            case ${choice:-1} in
+                1) address=$XRAY_IPV6; break ;;
+                2) address=$XRAY_IPV4; break ;;
+                *) printf '输入错误：请选择 1 或 2。\n' >&2 ;;
+            esac
+        done
+    else
+        address=${XRAY_IPV6:-$XRAY_IPV4}
+    fi
+    [[ -n $address ]] || { xray_error '未找到可用的公网 IPv4 或全局 IPv6。'; return 1; }
+    printf '%s\n' "$address"
 }
 xray_validate() { "$XRAY_BIN" run -test -config "$1" >/dev/null 2>&1; }
 xray_read() {
@@ -87,11 +151,8 @@ xray_url() {
     xray_read || return 1
     xray_validate "$XRAY_CONFIG" || { xray_error '当前配置校验失败。'; return 1; }
     xray_effective || return 1
-    if [[ -z $address ]]; then
-        address=$(jq -er '.server_ip | select(type == "string")' "$XRAY_META" 2>/dev/null) ||
-            { xray_error '缺少服务器地址记录，请运行安装器补全。'; return 1; }
-    fi
-    xray_ipv4 "$address" || { xray_error '连接地址必须是有效的公网 IPv4。'; return 1; }
+    address=$(xray_select_address "$address") || return 1
+    if xray_ipv6 "$address"; then address="[$address]"; fi
     uuid=$(jq -r --argjson i "$XRAY_INDEX" '.inbounds[$i].settings.clients[0].id' "$XRAY_CONFIG")
     flow=$(jq -r --argjson i "$XRAY_INDEX" '.inbounds[$i].settings.clients[0].flow' "$XRAY_CONFIG")
     sni=$(jq -r --argjson i "$XRAY_INDEX" '.inbounds[$i].streamSettings.realitySettings.serverNames[0]' "$XRAY_CONFIG")
@@ -108,7 +169,7 @@ xray_url() {
 xray_link_main() {
     set -Eeuo pipefail
     case ${1:-} in
-        -h|--help) printf '用法：/root/xray-link [公网 IPv4]\n生成当前生效配置的 VLESS 分享链接。指定地址只对本次输出有效。\n'; return 0 ;;
+        -h|--help) printf '用法：/root/xray-link [公网 IPv4 或全局 IPv6]\n生成当前生效配置的 VLESS 分享链接。指定地址只对本次输出有效。\n'; return 0 ;;
     esac
     (( $# <= 1 )) || { xray_error '参数过多，使用 --help 查看帮助。'; return 1; }
     xray_root

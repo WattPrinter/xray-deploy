@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 case ${1:-} in
-    -h|--help) printf '用法：/root/xray-qrcode [公网 IPv4]\n在终端显示当前 VLESS 分享链接的二维码。\n'; exit 0 ;;
+    -h|--help) printf '用法：/root/xray-qrcode [公网 IPv4 或全局 IPv6]\n在终端显示当前 VLESS 分享链接的二维码。\n'; exit 0 ;;
 esac
 (( $# <= 1 )) || { printf '错误：参数过多，使用 --help 查看帮助。\n' >&2; exit 1; }
 (( EUID == 0 )) || { printf '错误：请使用 root 运行此工具。\n' >&2; exit 1; }
 [[ -x /root/xray-link ]] || { printf '错误：缺少连接工具，请重新运行安装器。\n' >&2; exit 1; }
 command -v qrencode >/dev/null || { printf '错误：缺少二维码依赖，请重新运行安装器。\n' >&2; exit 1; }
-url=$(/root/xray-link "$@") || exit 1
+source /root/xray-link
+address=$(xray_select_address "${1:-}") || exit 1
+url=$(/root/xray-link "$address") || exit 1
 printf '请使用客户端扫描下方二维码：\n'
 printf '%s' "$url" | qrencode -t ANSIUTF8 || { printf '错误：二维码生成失败，请重新运行安装器修复依赖。\n' >&2; exit 1; }

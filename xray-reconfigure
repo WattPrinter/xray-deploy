@@ -37,7 +37,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 xray_identity
 cp -p "$XRAY_CONFIG" "$work/previous.json"
-# 只有候选文件包含新身份；地址元数据不含身份参数，无需替换。
+# 只有候选文件包含新身份；不保存连接地址。
 jq --argjson i "$XRAY_INDEX" --arg uuid "$XRAY_UUID" --arg private "$XRAY_PRIVATE" --arg sid "$XRAY_SID" '
     .inbounds[$i].settings.clients[0].id = $uuid |
     .inbounds[$i].streamSettings.realitySettings.privateKey = $private |
@@ -53,5 +53,6 @@ replaced=0
 printf '\nXray 身份参数更新成功！\n\nUUID：\n%s\n\nREALITY 公钥：\n%s\n\nREALITY 私钥：\n%s\n\nShort ID：\n%s\n\n服务状态：运行中\n监听端口：%s\n\n' \
     "$XRAY_UUID" "$XRAY_PUBLIC" "$XRAY_PRIVATE" "$XRAY_SID" "$XRAY_PORT"
 printf '请妥善保存参数，勿将以上输出公开或重定向到公开日志。\n\n'
-/root/xray-link
-/root/xray-qrcode
+address=$(xray_select_address) || exit 1
+/root/xray-link "$address"
+/root/xray-qrcode "$address"
