@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+case ${1:-} in
+    -h|--help) printf '用法：/root/xray-reconfigure\n确认后重置 UUID、REALITY 密钥和 Short ID，原客户端连接将失效。\n'; exit 0 ;;
+esac
+(( $# == 0 )) || { printf '错误：此工具不接受参数。\n' >&2; exit 1; }
+[[ -r /root/xray-link ]] || { printf '错误：缺少公共工具，请重新运行安装器。\n' >&2; exit 1; }
+source /root/xray-link
+xray_root
+xray_lock
+xray_read
+xray_validate "$XRAY_CONFIG" || { xray_error '原配置无效，不能执行身份重置。'; exit 1; }
+xray_effective
+printf '====================================\n       Xray 身份参数重置\n====================================\n\n此操作将重新生成：\n\n- UUID\n- REALITY 私钥\n- REALITY 公钥\n- Short ID\n\n原有客户端连接信息将失效。\n\n'
+read -r -p '是否继续？[y/N]: ' answer || exit 1
+case $answer in y|Y|yes|YES) ;; *) printf '已取消，身份参数未改变。\n'; exit 0 ;; esac
+work=$(mktemp -d "$XRAY_DIR/.reset.XXXXXX")
+replaced=0
+rollback() {
+    local result=$?
+    trap - EXIT INT TERM
+    if (( replaced )); then
+        if cp -p "$work/previous.json" "$work/restore.json" && mv -f "$work/restore.json" "$XRAY_CONFIG" &&
+            systemctl restart xray >/dev/null 2>&1 && xray_health; then
+            printf '错误：更新失败，已恢复原配置和原身份参数，服务运行正常。\n' >&2
+        else
+            printf '错误：恢复服务失败；原配置备份保存在 %s/previous.json，请手动恢复。\n' "$work" >&2
+            exit 1
+        fi
+    fi
+    rm -rf "$work"
+    exit "$result"
+}
+trap rollback EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+xray_identity
+cp -p "$XRAY_CONFIG" "$work/previous.json"
+# 只有候选文件包含新身份；地址元数据不含身份参数，无需替换。
+jq --argjson i "$XRAY_INDEX" --arg uuid "$XRAY_UUID" --arg private "$XRAY_PRIVATE" --arg sid "$XRAY_SID" '
+    .inbounds[$i].settings.clients[0].id = $uuid |
+    .inbounds[$i].streamSettings.realitySettings.privateKey = $private |
+    .inbounds[$i].streamSettings.realitySettings.shortIds = [$sid]' \
+    "$XRAY_CONFIG" > "$work/candidate.json"
+xray_validate "$work/candidate.json" || { xray_error '候选配置校验失败，原配置和运行中的服务未改变。'; exit 1; }
+replaced=1
+mv "$work/candidate.json" "$XRAY_CONFIG"
+systemctl restart xray >/dev/null 2>&1 || { xray_error '新配置启动失败，正在恢复。'; exit 1; }
+xray_health || { xray_error '新配置服务或监听检查失败，正在恢复。'; exit 1; }
+xray_effective
+replaced=0
+printf '\nXray 身份参数更新成功！\n\nUUID：\n%s\n\nREALITY 公钥：\n%s\n\nREALITY 私钥：\n%s\n\nShort ID：\n%s\n\n服务状态：运行中\n监听端口：%s\n\n' \
+    "$XRAY_UUID" "$XRAY_PUBLIC" "$XRAY_PRIVATE" "$XRAY_SID" "$XRAY_PORT"
+printf '请妥善保存参数，勿将以上输出公开或重定向到公开日志。\n\n'
+/root/xray-link
+/root/xray-qrcode
